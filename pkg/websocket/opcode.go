@@ -12,8 +12,24 @@ const (
 	OpcodePongFrame     Opcode = 10
 )
 
+func (op Opcode) IsControl() bool {
+	return op == OpcodeCloseFrame || op == OpcodePingFrame || op == OpcodePongFrame
+}
+
+func (op Opcode) IsData() bool {
+	return op == OpcodeTextFrame || op == OpcodeBinaryFrame
+}
+
+func (op Opcode) IsClose() bool {
+	return op == OpcodeCloseFrame
+}
+
+func (op Opcode) IsContinue() bool {
+	return op == OpcodeContinueFrame
+}
+
 func (op Opcode) Valid() bool {
-	return op == OpcodeTextFrame || op == OpcodeBinaryFrame || op == OpcodeCloseFrame || op == OpcodePingFrame || op == OpcodePongFrame || op == OpcodeContinueFrame
+	return op.IsControl() || op.IsData() || op.IsClose() || op.IsContinue()
 }
 
 func (op Opcode) String() string {

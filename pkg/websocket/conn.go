@@ -8,31 +8,37 @@ import (
 )
 
 const (
+	maxInt = int(^uint(0) >> 1)
+
 	defaultReadBuffSize  = 4096
 	defaultWriteBuffSize = 4096
+
+	frameMinHeaderSize    = 2
+	frameMaskSize         = 4
+	frameMaxPayloadLength = 8
+	frameMaxHeaderSize    = frameMinHeaderSize + frameMaxPayloadLength + frameMaskSize
 )
 
-type Payload struct {
-	Opcode Opcode
-	Data   []byte
-	Err    error
+type WebSocket interface {
+	WriteMessage(opc Opcode, data []byte) error
+
+	ReadMessage() (Opcode, []byte, error)
+
+	LocalAddr() net.Addr
+
+	RemoteAddr() net.Addr
+
+	IsClosed() bool
 }
 
-type Conn interface {
-	IsWsConn() bool
-	ReadMessage() (opc Opcode, b []byte, err error)
-}
-
-func NewConn(connection net.Conn, reader *bufio.Reader, readBuffSize, writeBuffSize int) Conn {
-	if reader == nil {
-		if readBuffSize == 0 {
-			readBuffSize = defaultReadBuffSize
-		}
-
-		reader = bufio.NewReaderSize(connection, readBuffSize)
+func NewConn(connection net.Conn, readBuffSize, writeBuffSize int, writeBuf []byte, isClient bool) WebSocket {
+	if readBuffSize == 0 {
+		readBuffSize = defaultReadBuffSize
 	}
 
-	return &conn{
+	reader := bufio.NewReaderSize(connection, readBuffSize)
+
+	return &webSocketConn{
 		conn:          connection,
 		reader:        reader,
 		readBuffSize:  readBuffSize,
@@ -40,99 +46,222 @@ func NewConn(connection net.Conn, reader *bufio.Reader, readBuffSize, writeBuffS
 	}
 }
 
-type conn struct {
+type webSocketConn struct {
 	conn   net.Conn
 	reader *bufio.Reader
 
 	readBuffSize  int
 	writeBuffSize int
+	writeBuffer   []byte
+
+	isClient bool
+	isClosed bool
 }
 
-func (c *conn) IsWsConn() bool {
-	return true
+func (c *webSocketConn) LocalAddr() net.Addr {
+	return c.conn.LocalAddr()
+}
+
+func (c *webSocketConn) RemoteAddr() net.Addr {
+	return c.conn.RemoteAddr()
+}
+
+func (c *webSocketConn) IsClosed() bool {
+	return c.isClosed
 }
 
 const (
-	opcodeMask     byte = 0xF  // 00001111
-	finMask        byte = 0x80 // 1 << 7 // 10000000
-	rsv1Mask       byte = 0x40 // 1 << 6
-	rsv2Mask       byte = 0x20 // 1 << 5
-	rsv3Mask       byte = 0x10 // 1 << 4
-	payloadLenMask byte = 0x7F
+	opcodeBitMask     byte = 0xF  // 00001111
+	finBitMask        byte = 0x80 // 1 << 7 // 10000000
+	maskBitMask       byte = 0x80
+	rsv1BitMask       byte = 0x40 // 1 << 6
+	rsv2BitMask       byte = 0x20 // 1 << 5
+	rsv3BitMask       byte = 0x10 // 1 << 4
+	payloadLenBitMask byte = 0x7F
 )
 
-// https://datatracker.ietf.org/doc/html/rfc6455#section-5.2
-func (c *conn) ReadMessage() (opc Opcode, b []byte, err error) {
-	var headerBytes []byte
-
-	reader := c.reader
-	fin, masked := false, false
-	var remainingRead int64 = 0
-
-	for err == nil && !fin {
-		var buf []byte
-		headerBytes, err = readN(reader, 2)
-		if err != nil {
-			return opc, b, fmt.Errorf("websocket: %v", err)
-		}
-
-		opc = Opcode(headerBytes[0] & opcodeMask)
-		fin = (headerBytes[0] & finMask) == (1 << 7)
-
-		rsv1 := (headerBytes[0] & rsv1Mask) != 0
-		rsv2 := (headerBytes[0] & rsv2Mask) != 0
-		rsv3 := (headerBytes[0] & rsv3Mask) != 0
-		if rsv1 || rsv2 || rsv3 {
-			return opc, b, fmt.Errorf("websocket: rsv bit is set")
-		}
-
-		masked = (headerBytes[1] & (1 << 7)) == (1 << 7)
-		remainingRead = int64(headerBytes[1] & payloadLenMask)
-
-		if !opc.Valid() {
-			return opc, b, fmt.Errorf("websocket: invalid opcode: %d", opc)
-		}
-
-		var maskingKey []byte
-		if masked {
-			maskingKey, err = readN(reader, 4)
-			if err != nil {
-				return opc, b, fmt.Errorf("websocket: %v", err)
-			}
-		}
-
-		var extPayloadLen []byte
-		if remainingRead == 126 {
-			extPayloadLen, err = readN(reader, 2)
-			if err != nil {
-				return opc, b, fmt.Errorf("websocket: %v", err)
-			}
-			remainingRead = int64(binary.BigEndian.Uint16(extPayloadLen))
-		} else if remainingRead == 127 {
-			extPayloadLen, err = readN(reader, 8)
-			if err != nil {
-				return opc, b, fmt.Errorf("websocket: %v", err)
-			}
-			remainingRead = int64(binary.BigEndian.Uint64(extPayloadLen))
-		} else if remainingRead > 127 {
-			return opc, b, fmt.Errorf("websocket: invalid payload length: %d", remainingRead)
-		}
-
-		buf, err = readN(reader, int(remainingRead))
-		if err != nil {
-			return opc, b, fmt.Errorf("websocket: %v", err)
-		}
-
-		if masked && maskingKey != nil {
-			for i := range buf {
-				buf[i] ^= maskingKey[i%4]
-			}
-		}
-
-		b = append(b, buf...)
+func frameHeaderSize(payloadLen int, masked bool) int {
+	size := frameMinHeaderSize
+	if payloadLen > 125 && payloadLen <= 0xFFFF {
+		size += 2
+	} else if payloadLen > 0xFFFF {
+		size += frameMaxPayloadLength
 	}
 
-	return opc, b, err
+	if masked {
+		size += frameMaskSize
+	}
+
+	return size
+}
+
+func (c *webSocketConn) WriteMessage(opc Opcode, payload []byte) error {
+	buf := make([]byte, c.writeBuffSize)
+
+	frameSize := frameHeaderSize(len(payload), c.isClient)
+	if frameSize <= c.writeBuffSize {
+		if _, err := c.writeFrame(opc, buf, payload, c.isClient, true); err != nil {
+			return err
+		}
+
+		_, err := c.conn.Write(buf)
+		return err
+	}
+
+	firstFrame := true
+	offset := 0
+	for offset < len(payload) {
+		frameSize = c.writeBuffSize - frameMaxHeaderSize
+		remaining := len(payload) - offset
+		if remaining < frameSize {
+			frameSize = remaining
+		}
+
+		fin := (offset + frameSize) == len(payload)
+		n, err := c.writeFrame(opc, buf, payload[offset:offset+frameSize], c.isClient, fin)
+		if err != nil {
+			return err
+		}
+
+		if _, err := c.conn.Write(buf[:n]); err != nil {
+			return err
+		}
+
+		offset += frameSize
+		if firstFrame {
+			opc = OpcodeContinueFrame
+			firstFrame = false
+		}
+	}
+
+	return nil
+}
+
+func (c *webSocketConn) writeHeaderFrame(opc Opcode, dest, src []byte, masked, fin bool) int {
+	dest[0] = byte(opc)
+	if fin {
+		dest[0] |= finBitMask
+	}
+
+	n := len(src)
+	pos := 1
+	if n <= 125 {
+		dest[pos] = byte(n)
+		pos++
+	} else if n > 125 && n <= 0xFFFF {
+		dest[pos] = 126
+		pos++
+		binary.BigEndian.PutUint16(dest[pos:], uint16(n))
+		pos += 2
+	} else {
+		dest[pos] = 127
+		pos++
+		binary.BigEndian.PutUint64(dest[pos:], uint64(n))
+		pos += 8
+	}
+
+	if masked {
+		dest[1] |= finBitMask
+	}
+
+	return pos
+}
+
+func (c *webSocketConn) writeFrame(opcode Opcode, dest, src []byte, masked, fin bool) (int, error) {
+	pos := c.writeHeaderFrame(opcode, dest, src, masked, fin)
+	n := pos
+
+	if !masked {
+		return copy(dest[pos:], src), nil
+	}
+
+	mask := getMaskKey()
+	n += copy(dest[pos:], mask)
+	pos += frameMaskSize
+	n += copy(dest[pos:], src)
+
+	for i := pos; len(dest) > i; i++ {
+		dest[i] ^= mask[i%4]
+	}
+
+	return n, nil
+}
+
+// https://datatracker.ietf.org/doc/html/rfc6455#section-5.2
+func (c *webSocketConn) ReadMessage() (Opcode, []byte, error) {
+	var opc Opcode
+	var message []byte = make([]byte, c.readBuffSize)
+
+	pos := 0
+	reader := c.reader
+	fin, firstFrame := false, true
+
+	for !fin {
+		header, err := readN(reader, 2)
+		if err != nil {
+			return 0, []byte{}, fmt.Errorf("websocket: %w", err)
+		}
+
+		fin = header[0]&finBitMask != 0
+		opcode := Opcode(header[0] & opcodeBitMask)
+		if firstFrame {
+			opc = opcode
+			firstFrame = false
+		} else if !opcode.IsContinue() && !opcode.IsClose() {
+			return 0, []byte{}, fmt.Errorf("websocket: unexpected opcode [%d <-> %s] in fragmented message", opcode, opcode)
+		} else if opcode.IsClose() {
+			c.isClosed = true
+		}
+
+		payloadLen := int(header[1] & payloadLenBitMask)
+
+		if payloadLen == 126 {
+			extPayloadLen, err := readN(reader, 2)
+			if err != nil {
+				return 0, nil, fmt.Errorf("websocket: %w", err)
+			}
+			payloadLen = int(binary.BigEndian.Uint16(extPayloadLen))
+		} else if payloadLen == 127 {
+			extPayloadLen, err := readN(reader, 8)
+			if err != nil {
+				return 0, nil, fmt.Errorf("websocket: %w", err)
+			}
+
+			n := binary.BigEndian.Uint64(extPayloadLen)
+			if n > uint64(maxInt) {
+				return 0, []byte{}, fmt.Errorf("websocket: payload too large (%d bytes)", n)
+			}
+
+			payloadLen = int(n)
+		} else if payloadLen <= 125 {
+			return 0, []byte{}, fmt.Errorf("websocket: unexpected payloadLen %d, allowed=[125,126,127]", payloadLen)
+		}
+
+		if pos+payloadLen > maxInt {
+			return 0, []byte{}, fmt.Errorf("websocket: payload too large (%d bytes)", pos+payloadLen)
+		}
+
+		var mask []byte
+		masked := header[1]&maskBitMask != 0
+		if masked {
+			mask, err = readN(reader, 4)
+		}
+
+		data, err := readN(reader, payloadLen)
+		if err != nil {
+			return 0, nil, fmt.Errorf("websocket: %w", err)
+		}
+
+		if masked {
+			for i := range data {
+				data[i] ^= mask[i%4]
+			}
+		}
+
+		pos += copy(message[pos:], data)
+	}
+
+	return opc, message, nil
 }
 
 // https://github.com/golang/go/issues/17064
@@ -143,4 +272,8 @@ func readN(r *bufio.Reader, n int) ([]byte, error) {
 	}
 	r.Discard(n)
 	return buf, err
+}
+
+func getMaskKey() []byte {
+	return []byte{0x12, 0x34, 0x56, 0x78}
 }
