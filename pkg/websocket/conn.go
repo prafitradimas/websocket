@@ -193,6 +193,10 @@ type Message struct {
 	Err    error
 }
 
+func (m *Message) String() string {
+	return string(m.Data)
+}
+
 // https://datatracker.ietf.org/doc/html/rfc6455#section-5.2
 func (c *webSocketConn) ReadMessage() Message {
 	var opc Opcode
@@ -271,7 +275,7 @@ func (c *webSocketConn) ReadMessage() Message {
 		pos += copy(message[pos:], data)
 	}
 
-	return Message{Opcode: opc, Data: message}
+	return Message{Opcode: opc, Data: message[:pos]}
 }
 
 func (c *webSocketConn) MessageIter() <-chan Message {
