@@ -243,8 +243,8 @@ func (c *webSocketConn) ReadMessage() Message {
 			}
 
 			payloadLen = int(n)
-		} else if payloadLen <= 125 {
-			return Message{Err: fmt.Errorf("websocket: unexpected payloadLen %d, allowed=[125,126,127]", payloadLen)}
+		} else if payloadLen > 127 {
+			return Message{Err: fmt.Errorf("websocket: unexpected payloadLen %d", payloadLen)}
 		}
 
 		if pos+payloadLen > maxInt {
