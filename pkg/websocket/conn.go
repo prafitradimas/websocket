@@ -22,7 +22,7 @@ const (
 type WebSocket interface {
 	WriteMessage(opc Opcode, data []byte) error
 
-	ReadMessage() (Opcode, []byte, error)
+	ReadMessage() Message
 
 	LocalAddr() net.Addr
 
@@ -187,10 +187,16 @@ func (c *webSocketConn) writeFrame(opcode Opcode, dest, src []byte, masked, fin 
 	return n, nil
 }
 
+type Message struct {
+	Opcode Opcode
+	Data   []byte
+	Err    error
+}
+
 // https://datatracker.ietf.org/doc/html/rfc6455#section-5.2
-func (c *webSocketConn) ReadMessage() (Opcode, []byte, error) {
+func (c *webSocketConn) ReadMessage() Message {
 	var opc Opcode
-	var message []byte = make([]byte, c.readBuffSize)
+	message := make([]byte, c.readBuffSize)
 
 	pos := 0
 	reader := c.reader
@@ -199,7 +205,9 @@ func (c *webSocketConn) ReadMessage() (Opcode, []byte, error) {
 	for !fin {
 		header, err := readN(reader, 2)
 		if err != nil {
-			return 0, []byte{}, fmt.Errorf("websocket: %w", err)
+			return Message{
+				Err: wrapError(err),
+			}
 		}
 
 		fin = header[0]&finBitMask != 0
@@ -208,7 +216,9 @@ func (c *webSocketConn) ReadMessage() (Opcode, []byte, error) {
 			opc = opcode
 			firstFrame = false
 		} else if !opcode.IsContinue() && !opcode.IsClose() {
-			return 0, []byte{}, fmt.Errorf("websocket: unexpected opcode [%d <-> %s] in fragmented message", opcode, opcode)
+			return Message{
+				Err: fmt.Errorf("websocket: unexpected opcode [%d <-> %s] in fragmented message", opcode, opcode),
+			}
 		} else if opcode.IsClose() {
 			c.isClosed = true
 		}
@@ -216,29 +226,29 @@ func (c *webSocketConn) ReadMessage() (Opcode, []byte, error) {
 		payloadLen := int(header[1] & payloadLenBitMask)
 
 		if payloadLen == 126 {
-			extPayloadLen, err := readN(reader, 2)
-			if err != nil {
-				return 0, nil, fmt.Errorf("websocket: %w", err)
+			extPayloadLen, _err := readN(reader, 2)
+			if _err != nil {
+				return Message{Err: wrapError(_err)}
 			}
 			payloadLen = int(binary.BigEndian.Uint16(extPayloadLen))
 		} else if payloadLen == 127 {
-			extPayloadLen, err := readN(reader, 8)
-			if err != nil {
-				return 0, nil, fmt.Errorf("websocket: %w", err)
+			extPayloadLen, _err := readN(reader, 8)
+			if _err != nil {
+				return Message{Err: wrapError(_err)}
 			}
 
 			n := binary.BigEndian.Uint64(extPayloadLen)
 			if n > uint64(maxInt) {
-				return 0, []byte{}, fmt.Errorf("websocket: payload too large (%d bytes)", n)
+				return Message{Err: fmt.Errorf("websocket: payload too large (%d bytes)", n)}
 			}
 
 			payloadLen = int(n)
 		} else if payloadLen <= 125 {
-			return 0, []byte{}, fmt.Errorf("websocket: unexpected payloadLen %d, allowed=[125,126,127]", payloadLen)
+			return Message{Err: fmt.Errorf("websocket: unexpected payloadLen %d, allowed=[125,126,127]", payloadLen)}
 		}
 
 		if pos+payloadLen > maxInt {
-			return 0, []byte{}, fmt.Errorf("websocket: payload too large (%d bytes)", pos+payloadLen)
+			return Message{Err: fmt.Errorf("websocket: payload too large (%d bytes)", pos+payloadLen)}
 		}
 
 		var mask []byte
@@ -249,7 +259,7 @@ func (c *webSocketConn) ReadMessage() (Opcode, []byte, error) {
 
 		data, err := readN(reader, payloadLen)
 		if err != nil {
-			return 0, nil, fmt.Errorf("websocket: %w", err)
+			return Message{Err: wrapError(err)}
 		}
 
 		if masked {
@@ -261,7 +271,24 @@ func (c *webSocketConn) ReadMessage() (Opcode, []byte, error) {
 		pos += copy(message[pos:], data)
 	}
 
-	return opc, message, nil
+	return Message{Opcode: opc, Data: message}
+}
+
+func (c *webSocketConn) MessageIter() <-chan Message {
+	ch := make(chan Message)
+
+	go func() {
+		defer close(ch)
+
+		shouldClose := false
+		for !shouldClose {
+			m := c.ReadMessage()
+			ch <- m
+
+			shouldClose = m.Err != nil
+		}
+	}()
+	return ch
 }
 
 // https://github.com/golang/go/issues/17064
