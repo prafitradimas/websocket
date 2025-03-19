@@ -28,8 +28,11 @@ func (op Opcode) IsContinue() bool {
 	return op == OpcodeContinueFrame
 }
 
-func (op Opcode) Valid() bool {
-	return op.IsControl() || op.IsData() || op.IsClose() || op.IsContinue()
+func (op Opcode) Valid() error {
+	if op.IsControl() || op.IsData() || op.IsClose() || op.IsContinue() {
+		return nil
+	}
+	return ErrBadOpcode
 }
 
 func (op Opcode) String() string {

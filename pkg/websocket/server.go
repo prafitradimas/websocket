@@ -9,9 +9,6 @@ import (
 )
 
 type WebSocketServer struct {
-	ReadBufferSize  int
-	WriteBufferSize int
-
 	Subprotocols []string
 }
 
@@ -37,22 +34,12 @@ func (this *WebSocketServer) Upgrade(res http.ResponseWriter, req *http.Request)
 	//      Origin: http://example.com
 	//      Sec-WebSocket-Protocol: chat, superchat
 	//      Sec-WebSocket-Version: 13
-	if req.Header.Get("Connection") != "Upgrade" {
+	if req.Header.Get("Connection") != "Upgrade" || req.Header.Get("Upgrade") != "websocket" {
 		res.WriteHeader(http.StatusUpgradeRequired)
-		return nil, ErrBadHandshake
+		return nil, ErrBadUpgrade
 	}
 
-	if req.Header.Get("Upgrade") != "websocket" {
-		res.WriteHeader(http.StatusUpgradeRequired)
-		return nil, ErrBadHandshake
-	}
-
-	if req.Header.Get("Sec-WebSocket-Version") != "13" {
-		res.WriteHeader(http.StatusBadRequest)
-		return nil, ErrBadHandshake
-	}
-
-	if req.Header.Get("Sec-WebSocket-Key") == "" {
+	if req.Header.Get("Sec-WebSocket-Version") != "13" || req.Header.Get("Sec-WebSocket-Key") == "" {
 		res.WriteHeader(http.StatusBadRequest)
 		return nil, ErrBadHandshake
 	}
@@ -85,13 +72,5 @@ func (this *WebSocketServer) Upgrade(res http.ResponseWriter, req *http.Request)
 		return nil, wrapError(err)
 	}
 
-	hijackedBuffer := readwriter.AvailableBuffer()
-
-	var wbuf []byte = nil
-	if len(hijackedBuffer) >= this.WriteBufferSize {
-		wbuf = hijackedBuffer
-		this.WriteBufferSize = len(hijackedBuffer)
-	}
-
-	return NewConn(conn, this.ReadBufferSize, this.WriteBufferSize, wbuf, false), nil
+	return NewConn(conn, readwriter.Reader, readwriter.Writer, false), nil
 }

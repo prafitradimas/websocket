@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net"
@@ -74,7 +75,8 @@ func (client *WebSocketClient) DialWithContext(ctx context.Context, url *url.URL
 		return nil, wrapError(err)
 	}
 
-	ws := NewConn(conn, client.ReadBufferSize, client.WriteBufferSize, nil, true).(*webSocketConn)
+	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+	ws := NewConn(conn, rw.Reader, rw.Writer, true).(*webSocketConn)
 	if err = req.Write(conn); err != nil {
 		return nil, wrapError(err)
 	}
