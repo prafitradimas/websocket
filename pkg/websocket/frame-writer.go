@@ -122,7 +122,7 @@ func (frameWriter *frameWriter) Flush(payload []byte, masked, final bool) (n int
 		frameWriter.writer.Write(mask)
 
 		for i := range payload {
-			payload[i] ^= mask[i%4]
+			payload[i] ^= mask[i&3]
 		}
 	}
 

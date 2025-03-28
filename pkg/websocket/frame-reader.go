@@ -123,7 +123,7 @@ func NewFrameReader(reader *bufio.Reader) (fr FrameReader, err error) {
 		}
 
 		for i := 0; masked && i < len(payload); i++ {
-			payload[i] ^= mask[i%frameMaskSize]
+			payload[i] ^= mask[i&3]
 		}
 
 		_, err = frameBuff.Write(payload)
