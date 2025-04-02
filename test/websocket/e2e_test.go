@@ -2,6 +2,7 @@ package websocket_test
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -107,7 +108,7 @@ func TestEcho(t *testing.T) {
 	c := &websocket.WebSocketClient{}
 	defer s.Close()
 
-	ctx := t.Context()
+	ctx := context.Background()
 	conn, err := c.DialWithContext(ctx, newURL(s.URL), nil)
 	if err != nil {
 		t.Fatalf("DialWithContext: %v", err)
@@ -163,7 +164,7 @@ func TestPingPong(t *testing.T) {
 	c := &websocket.WebSocketClient{}
 	defer s.Close()
 
-	ctx := t.Context()
+	ctx := context.Background()
 	conn, err := c.DialWithContext(ctx, newURL(s.URL), nil)
 	if err != nil {
 		t.Fatalf("DialWithContext: %v", err)
