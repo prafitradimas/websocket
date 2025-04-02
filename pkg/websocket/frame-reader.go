@@ -54,7 +54,7 @@ func (frameReader *frameReader) Err() error {
 }
 
 func NewFrameReader(reader io.Reader) FrameReader {
-	frameBuff := bytes.NewBuffer(make([]byte, 512))
+	frameBuff := bytes.NewBuffer(make([]byte, 0, 512))
 	fr := &frameReader{}
 	fr.buffer = frameBuff
 

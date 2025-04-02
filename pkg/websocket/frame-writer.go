@@ -35,7 +35,7 @@ func NewFrameWriter(opc Opcode, writer io.Writer, buf []byte, masked bool) Frame
 		opcode:    opc,
 		writer:    writer,
 		buf:       buf,
-		writeSize: len(buf),
+		writeSize: cap(buf),
 		masked:    masked,
 	}
 }

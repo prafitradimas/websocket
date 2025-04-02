@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"encoding/binary"
 	"errors"
+	"io"
 	"net"
 	"sync"
+	"time"
 )
 
 type WebSocket interface {
@@ -66,6 +68,8 @@ func (c *webSocketConn) WriteMessage(opc Opcode, payload []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
+	c.conn.SetWriteDeadline(time.Now().Add(time.Second * 2))
+
 	buf := make([]byte, 512)
 	writer := NewFrameWriter(opc, c.conn, buf, c.isClient)
 	_, err := writer.Write(payload)
@@ -74,15 +78,16 @@ func (c *webSocketConn) WriteMessage(opc Opcode, payload []byte) error {
 }
 
 func (c *webSocketConn) WriteCloseMessage(status CloseStatus, payload []byte) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+	if len(payload) > 125 {
+		return errors.New("too large")
+	}
 
-	buf := make([]byte, 512)
-	closeStatusLen := 2
-	binary.BigEndian.PutUint16(buf, uint16(status))
-	copy(buf[closeStatusLen:], payload)
+	buf := make([]byte, 0, 125)
+	binary.BigEndian.AppendUint16(buf, uint16(status))
+	buf = append(buf, payload...)
 
-	return c.WriteMessage(OpcodeCloseFrame, buf[:closeStatusLen+len(payload)])
+	err := c.WriteMessage(OpcodeCloseFrame, buf)
+	return err
 }
 
 type Message struct {
@@ -99,23 +104,23 @@ func (m *Message) String() string {
 func (c *webSocketConn) ReadMessage() Message {
 	if c.IsClosed() {
 		return Message{
-			Err: errors.New("connection is closed"),
+			Err: io.EOF,
 		}
 	}
 
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
 
-	msg := Message{}
+	c.conn.SetReadDeadline(time.Now().Add(time.Second * 2))
 
 	reader := NewFrameReader(c.conn)
-	if msg.Err != nil {
-		return msg
-	}
 
+	msg := Message{}
 	msg.Opcode = reader.Opcode()
-	msg.Data = reader.Data()
-	// msg.Data, msg.Err = io.ReadAll(reader)
+
+	if msg.Err == nil {
+		msg.Data, msg.Err = io.ReadAll(reader)
+	}
 
 	return msg
 }
