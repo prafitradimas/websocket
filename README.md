@@ -3,3 +3,4 @@ This project is for educational purposes only, created to learn how WebSockets w
 
 # References
 - https://datatracker.ietf.org/doc/html/rfc6455
+- https://datatracker.ietf.org/doc/html/rfc7692

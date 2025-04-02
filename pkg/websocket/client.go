@@ -11,9 +11,6 @@ import (
 )
 
 type WebSocketClient struct {
-	ReadBufferSize  int
-	WriteBufferSize int
-
 	Subprotocols []string
 }
 
@@ -77,9 +74,6 @@ func (client *WebSocketClient) DialWithContext(ctx context.Context, url *url.URL
 
 	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 	ws := NewConn(conn, rw.Reader, rw.Writer, true).(*webSocketConn)
-	if err = req.Write(conn); err != nil {
-		return nil, wrapError(err)
-	}
 
 	if tracer != nil && tracer.GotFirstResponseByte != nil {
 		if _, err = ws.reader.Peek(1); err != nil {

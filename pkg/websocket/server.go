@@ -12,13 +12,6 @@ type WebSocketServer struct {
 	Subprotocols []string
 }
 
-func serverKey(clientKey string) string {
-	hash := sha1.New()
-	hash.Write([]byte(clientKey))
-	hash.Write([]byte("258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
-	return base64.StdEncoding.EncodeToString(hash.Sum(nil))
-}
-
 func (this *WebSocketServer) Upgrade(res http.ResponseWriter, req *http.Request) (WebSocket, error) {
 	if req.Method != "GET" {
 		res.WriteHeader(http.StatusMethodNotAllowed)
@@ -73,4 +66,11 @@ func (this *WebSocketServer) Upgrade(res http.ResponseWriter, req *http.Request)
 	}
 
 	return NewConn(conn, readwriter.Reader, readwriter.Writer, false), nil
+}
+
+func serverKey(clientKey string) string {
+	hash := sha1.New()
+	hash.Write([]byte(clientKey))
+	hash.Write([]byte("258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	return base64.StdEncoding.EncodeToString(hash.Sum(nil))
 }

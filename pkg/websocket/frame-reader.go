@@ -19,6 +19,7 @@ type FrameReader interface {
 	Read([]byte) (int, error)
 	Opcode() Opcode
 	Len() int
+	Data() []byte
 	Err() error
 }
 
@@ -41,19 +42,27 @@ func (frameReader *frameReader) Len() int {
 	return frameReader.buffer.Len()
 }
 
+func (frameReader *frameReader) Data() []byte {
+	if frameReader.err != nil {
+		return frameReader.buffer.Bytes()
+	}
+	return []byte{}
+}
+
 func (frameReader *frameReader) Err() error {
 	return frameReader.err
 }
 
-func NewFrameReader(reader *bufio.Reader) (fr FrameReader, err error) {
-	var opcode Opcode
-	frameBuff := bytes.NewBuffer(make([]byte, 0, 512))
+func NewFrameReader(reader io.Reader) FrameReader {
+	frameBuff := bytes.NewBuffer(make([]byte, 512))
+	fr := &frameReader{}
+	fr.buffer = frameBuff
 
 	first, final := true, false
-	for !final {
+	for fr.err == nil && !final {
 		header := make([]byte, frameMinHeaderSize)
-		if _, err = io.ReadFull(reader, header); err != nil {
-			return
+		if _, err := io.ReadFull(reader, header); err != nil {
+			return fr
 		}
 
 		b0 := header[0]
@@ -63,13 +72,23 @@ func NewFrameReader(reader *bufio.Reader) (fr FrameReader, err error) {
 		rsv3 := b0&rsv3BitMask != 0
 		opc := Opcode(b0 & opcodeBitMask)
 
-		if err = opc.Valid(); err != nil {
-			return
-		} else if first && !opc.IsContinue() {
+		if err := opc.Valid(); err != nil {
+			return fr
+		}
+
+		// If this is a control frame, it must be final.
+		if first {
+			if opc.IsControl() && !final {
+				fr.err = errors.New("control frames must not be fragmented")
+				return fr
+			}
+			fr.opcode = opc
 			first = false
-			opcode = opc
-		} else if !first && !opc.IsContinue() {
-			return
+		} else {
+			if !opc.IsContinue() {
+				fr.err = errors.New("unexpected new frame when continuation expected")
+				return fr
+			}
 		}
 
 		if rsv1 {
@@ -77,49 +96,51 @@ func NewFrameReader(reader *bufio.Reader) (fr FrameReader, err error) {
 		}
 
 		if rsv2 {
-			err = errors.New("RSV2 is set")
-			return
+			fr.err = errors.New("RSV2 is set")
+			return fr
 		}
 		if rsv3 {
-			err = errors.New("RSV3 is set")
-			return
+			fr.err = errors.New("RSV3 is set")
+			return fr
 		}
 
 		b1 := header[1]
-		masked := b1&maskBitMask == 1
+		masked := b1&maskBitMask != 0
 		payloadLen := int64(b1 & payloadLenBitMask)
 
 		switch payloadLen {
 		case 126:
-			if extPayloadLen, err := readN(reader, 2); err != nil {
-				return nil, err
+			extPayloadLen := make([]byte, 2)
+			if _, err := reader.Read(extPayloadLen); err != nil {
+				fr.err = err
+				return fr
 			} else {
 				payloadLen = int64(binary.BigEndian.Uint16(extPayloadLen))
 			}
 		case 127:
-			if extPayloadLen, err := readN(reader, frameMaxPayloadLength); err != nil {
-				return nil, err
+			extPayloadLen := make([]byte, frameMaxPayloadLength)
+			if _, err := reader.Read(extPayloadLen); err != nil {
+				fr.err = err
+				return fr
 			} else {
 				payloadLen = int64(binary.BigEndian.Uint64(extPayloadLen))
 			}
 		}
 
-		var mask [frameMaskSize]byte
+		mask := make([]byte, frameMaskSize)
 		if masked {
-			var b byte
-			for i := 0; i < frameMaskSize; i++ {
-				if b, err = reader.ReadByte(); err != nil {
-					return nil, err
-				} else {
-					mask[i] = b
-				}
+			_, err := reader.Read(mask)
+			if err != nil {
+				fr.err = err
+				return fr
 			}
 		}
 
-		r := io.LimitReader(reader, payloadLen)
-		payload, err := io.ReadAll(r)
+		payload := make([]byte, payloadLen)
+		_, err := reader.Read(payload)
 		if err != nil {
-			return nil, err
+			fr.err = err
+			return fr
 		}
 
 		for i := 0; masked && i < len(payload); i++ {
@@ -128,15 +149,12 @@ func NewFrameReader(reader *bufio.Reader) (fr FrameReader, err error) {
 
 		_, err = frameBuff.Write(payload)
 		if err != nil {
-			return nil, err
+			fr.err = err
+			return fr
 		}
 	}
 
-	return &frameReader{
-		opcode: opcode,
-		buffer: frameBuff,
-		err:    err,
-	}, err
+	return fr
 }
 
 // https://github.com/golang/go/issues/17064

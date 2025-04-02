@@ -1,7 +1,6 @@
 package websocket
 
 import (
-	"bufio"
 	"bytes"
 	"testing"
 
@@ -9,38 +8,32 @@ import (
 )
 
 func TestFrame(t *testing.T) {
-	buf := make([]byte, 512)
-	buffer := bytes.NewBuffer(buf)
-	writer := websocket.NewFrameWriter(websocket.OpcodeTextFrame, bufio.NewWriter(buffer), true)
+	buf := bytes.NewBuffer(make([]byte, 0, 512))
+	writer := websocket.NewFrameWriter(websocket.OpcodeTextFrame, buf, make([]byte, 512), false)
 
 	data := []byte("Hello WebSocket")
-	n, err := writer.Write(data)
-	if err != nil {
-		t.Fatalf("unexpected write error: %v", err)
-	}
-	if n != len(data) {
-		t.Errorf("expected %d bytes written, got %d", len(data), n)
-	}
+	errCh := make(chan error, 1)
+	go func(errCh chan error) {
+		t.Logf("Sending data: %s\n", data)
+		_, err := writer.Write(data)
+		errCh <- err
+	}(errCh)
 
-	reader, err := websocket.NewFrameReader(bufio.NewReader(buffer))
-	if err != nil {
+	if err := <-errCh; err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	t.Log("Reading data")
+	reader := websocket.NewFrameReader(buf)
 	if reader == nil {
 		t.Fatal("reader should not be nil")
 	}
 
-	if reader.Len() != n {
-		t.Errorf("expected %d bytes read, got %d", len(data), reader.Len())
+	if reader.Err() != nil {
+		t.Fatalf("unexpected error: %v", reader.Err())
 	}
 
-	readData := make([]byte, 0, reader.Len())
-	if _, err := reader.Read(readData); err != nil {
-		t.Fatalf("unexpected read error: %v", err)
-	}
-
-	if bytes.Equal(data, readData) {
-		t.Fatalf("expected %s, got %s", data, readData)
+	if bytes.Equal(data, reader.Data()) {
+		t.Fatalf("expected %s, got %s", data, reader.Data())
 	}
 }

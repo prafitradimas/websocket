@@ -1,7 +1,6 @@
 package websocket
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
@@ -23,18 +22,21 @@ type FrameWriter interface {
 }
 
 type frameWriter struct {
-	opcode Opcode
-	masked bool
-
-	writer *bufio.Writer
-	err    error
+	writer    io.Writer
+	buf       []byte
+	writeSize int
+	opcode    Opcode
+	masked    bool
+	err       error
 }
 
-func NewFrameWriter(opc Opcode, writer *bufio.Writer, masked bool) FrameWriter {
+func NewFrameWriter(opc Opcode, writer io.Writer, buf []byte, masked bool) FrameWriter {
 	return &frameWriter{
-		opcode: opc,
-		masked: masked,
-		writer: writer,
+		opcode:    opc,
+		writer:    writer,
+		buf:       buf,
+		writeSize: len(buf),
+		masked:    masked,
 	}
 }
 
@@ -43,12 +45,12 @@ func (frameWriter *frameWriter) Write(b []byte) (int, error) {
 	n := len(b)
 	first := true
 	var offset, size, remaining int
-	for n > offset {
+	for frameWriter.err == nil && n > offset {
 		if frameWriter.err != nil {
 			return 0, frameWriter.err
 		}
 
-		size = frameWriter.writer.Available() - frameMaxHeaderSize
+		size = frameWriter.writeSize - frameMaxHeaderSize
 		remaining = n - offset
 		if size > remaining {
 			size = remaining
@@ -77,7 +79,7 @@ func (frameWriter *frameWriter) Flush(payload []byte, masked, final bool) (n int
 	}
 
 	n = len(payload)
-	if n > frameWriter.writer.Available()-frameMaxHeaderSize {
+	if n > frameWriter.writeSize-frameMaxHeaderSize {
 		return 0, bytes.ErrTooLarge
 	}
 
@@ -85,32 +87,28 @@ func (frameWriter *frameWriter) Flush(payload []byte, masked, final bool) (n int
 	if final {
 		b0 |= finBitMask
 	}
-	frameWriter.writer.WriteByte(b0)
+	frameWriter.buf[0] = b0
 
 	b1 := byte(0)
 	if masked {
 		b1 |= maskBitMask
 	}
 
+	pos := 2
+
 	if n <= 125 {
 		b1 |= byte(n)
-		frameWriter.writer.WriteByte(b1)
+		frameWriter.buf[1] = b1
 	} else if n > 125 && n <= 0xFFFF {
 		b1 |= 126
-		frameWriter.writer.WriteByte(b1)
-		err = binary.Write(frameWriter.writer, binary.BigEndian, uint16(n))
-		if err != nil {
-			frameWriter.err = err
-			return 0, err
-		}
+		frameWriter.buf[1] = b1
+		binary.BigEndian.PutUint16(frameWriter.buf[2:], uint16(n))
+		pos += 2
 	} else {
 		b1 |= 127
-		frameWriter.writer.WriteByte(b1)
-		err = binary.Write(frameWriter.writer, binary.BigEndian, uint64(n))
-		if err != nil {
-			frameWriter.err = err
-			return 0, err
-		}
+		frameWriter.buf[1] = b1
+		binary.BigEndian.PutUint64(frameWriter.buf[2:], uint64(n))
+		pos += 8
 	}
 
 	if masked {
@@ -119,19 +117,20 @@ func (frameWriter *frameWriter) Flush(payload []byte, masked, final bool) (n int
 			return 0, maskErr
 		}
 
-		frameWriter.writer.Write(mask)
+		pos += copy(frameWriter.buf[pos:pos+frameMaskSize], mask[:frameMaskSize])
 
 		for i := range payload {
 			payload[i] ^= mask[i&3]
 		}
 	}
 
-	if _, err = frameWriter.writer.Write(payload); err != nil {
+	copy(frameWriter.buf[pos:], payload)
+	if _, err = frameWriter.writer.Write(frameWriter.buf[:pos+n]); err != nil {
 		frameWriter.err = err
 		return 0, err
 	}
 
-	return n, frameWriter.writer.Flush()
+	return n, nil
 }
 
 func generateMaskingKey() (maskingKey []byte, err error) {
